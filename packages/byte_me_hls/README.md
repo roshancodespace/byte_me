@@ -98,3 +98,15 @@ await hlsDownloader.downloadHlsVideo(
 
 print('🎉 Video downloaded, stitched, and ready for playback!');
 ```
+
+### Pausing & Resuming
+
+You can easily pause and resume an active HLS download by calling the respective methods on the `HlsDownloader` instance. This will safely suspend the active segment workers without losing downloaded data.
+
+```dart
+// Pause the download
+hlsDownloader.pause();
+
+// Resume the download
+hlsDownloader.resume();
+```
