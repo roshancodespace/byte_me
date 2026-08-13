@@ -1,0 +1,11 @@
+name: byte_me_core
+description: "Core downloader library."
+version: 0.0.1
+homepage:
+
+environment:
+  sdk: ^3.9.2
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
