@@ -1,6 +1,5 @@
 # Byte Me HLS
 
-[![pub package](https://img.shields.io/pub/v/byte_me_hls.svg)](https://pub.dev/packages/byte_me_hls)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 A specialized, high-performance HTTP Live Streaming (HLS) downloader for Dart and Flutter. 
@@ -33,7 +32,10 @@ Add `byte_me_hls` to your `pubspec.yaml` (it automatically depends on `byte_me_c
 
 ```yaml
 dependencies:
-  byte_me_hls: ^1.0.0
+  byte_me_hls:
+    git:
+      url: https://github.com/roshancodespace/byte_me.git
+      path: packages/byte_me_hls
 ```
 
 ## How It Works

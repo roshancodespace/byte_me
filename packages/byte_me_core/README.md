@@ -1,6 +1,5 @@
 # Byte Me Core
 
-[![pub package](https://img.shields.io/pub/v/byte_me_core.svg)](https://pub.dev/packages/byte_me_core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 The foundational, high-performance download engine for the Byte Me ecosystem. 
@@ -36,7 +35,10 @@ Add `byte_me_core` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  byte_me_core: ^1.0.0
+  byte_me_core:
+    git:
+      url: https://github.com/roshancodespace/byte_me.git
+      path: packages/byte_me_core
 ```
 
 ## Core Architecture

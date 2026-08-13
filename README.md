@@ -3,7 +3,6 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Flutter](https://img.shields.io/badge/Platform-Flutter-02569B?logo=flutter)](https://flutter.dev/)
 [![Dart](https://img.shields.io/badge/Platform-Dart-0175C2?logo=dart)](https://dart.dev/)
-[![Pub Publisher](https://img.shields.io/pub/publisher/byte_me_core)](https://pub.dev/packages/byte_me_core)
 
 A highly scalable, modular, and production-ready downloading ecosystem for Dart and Flutter. 
 
@@ -29,8 +28,8 @@ This monorepo is split into focused, single-responsibility packages.
 
 | Package | Description | Pub |
 |---|---|---|
-| [`byte_me_core`](./packages/byte_me_core) | The foundational download engine. Handles concurrency, task queuing, pausing, resuming, and network abstractions. | [![pub package](https://img.shields.io/pub/v/byte_me_core.svg)](https://pub.dev/packages/byte_me_core) |
-| [`byte_me_hls`](./packages/byte_me_hls) | A specialized HLS (`.m3u8`) downloader built on the core engine. Handles segment batching, AES-128 decryption, and automatic video stitching. | [![pub package](https://img.shields.io/pub/v/byte_me_hls.svg)](https://pub.dev/packages/byte_me_hls) |
+| [`byte_me_core`](./packages/byte_me_core) | The foundational download engine. Handles concurrency, task queuing, pausing, resuming, and network abstractions. |
+| [`byte_me_hls`](./packages/byte_me_hls) | A specialized HLS (`.m3u8`) downloader built on the core engine. Handles segment batching, AES-128 decryption, and automatic video stitching. |
 
 ## Why Byte Me?
 
@@ -45,8 +44,14 @@ Add the packages you need to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  byte_me_core: ^1.0.0
-  byte_me_hls: ^1.0.0
+  byte_me_core:
+    git:
+      url: https://github.com/roshancodespace/byte_me.git
+      path: packages/byte_me_core
+  byte_me_hls:
+    git:
+      url: https://github.com/roshancodespace/byte_me.git
+      path: packages/byte_me_hls
 ```
 
 ## Getting Started
