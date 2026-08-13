@@ -14,11 +14,36 @@ import 'package:path/path.dart' as p;
 class HlsDownloader {
   final DownloadManager _manager;
 
+  bool _isPaused = false;
+  Completer<void>? _resumeCompleter;
+  final Set<DownloadTask> _activeTasks = {};
+
   /// Creates a new [HlsDownloader] using the provided [DownloadManager].
   ///
   /// The [DownloadManager] dictates the concurrency limits and handles the actual
   /// network requests for individual HLS segments.
   HlsDownloader(this._manager);
+
+  /// Pauses the current HLS download.
+  void pause() {
+    if (_isPaused) return;
+    _isPaused = true;
+    _resumeCompleter = Completer<void>();
+    for (final task in _activeTasks) {
+      _manager.pause(task.id);
+    }
+  }
+
+  /// Resumes a paused HLS download.
+  void resume() {
+    if (!_isPaused) return;
+    _isPaused = false;
+    for (final task in _activeTasks) {
+      _manager.resume(task.id);
+    }
+    _resumeCompleter?.complete();
+    _resumeCompleter = null;
+  }
 
   /// Downloads an HLS stream and stitches it into a single file.
   ///
@@ -76,6 +101,10 @@ class HlsDownloader {
 
       Future<void> worker() async {
         while (iterator.moveNext()) {
+          if (_isPaused && _resumeCompleter != null) {
+            await _resumeCompleter!.future;
+          }
+
           final i = iterator.current.$1; // $1 = key = index
           final segment = iterator.current.$2; // $2 = value = HlsSegment
           final segmentFile = File(p.join(tempDir.path, 'segment_$i.ts'));
@@ -88,6 +117,7 @@ class HlsDownloader {
           );
 
           final task = DownloadTask(request: request);
+          _activeTasks.add(task);
 
           int previousBytes = 0;
           task.progressStream.listen((prog) {
@@ -106,6 +136,8 @@ class HlsDownloader {
                 s == DownloadStatus.failed ||
                 s == DownloadStatus.cancelled,
           );
+
+          _activeTasks.remove(task);
 
           if (finalStatus != DownloadStatus.completed) {
             throw Exception("Segment $i failed with status: $finalStatus");
@@ -126,6 +158,11 @@ class HlsDownloader {
       // Decrypt (if needed) and Stitch
       await _stitchSegments(segments, tempDir, savePath);
     } finally {
+      for (final task in _activeTasks) {
+        _manager.cancel(task.id);
+      }
+      _activeTasks.clear();
+
       if (tempDir.existsSync()) {
         await tempDir.delete(recursive: true);
       }
