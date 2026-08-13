@@ -1,21 +1,34 @@
-# Downloader Core
+# Byte Me Core
 
 [![pub package](https://img.shields.io/pub/v/byte_me_core.svg)](https://pub.dev/packages/byte_me_core)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A robust, highly concurrent, and extensible download engine for Dart and Flutter. 
+The foundational, high-performance download engine for the Byte Me ecosystem. 
 
-`byte_me_core` provides the foundational architecture to build powerful downloading experiences. Whether you are downloading simple images, large ZIP files, or complex segmented media (like HLS), this package offers strict concurrency controls, real-time progress tracking, and complete lifecycle management.
+`byte_me_core` is designed to be a robust, concurrency-aware downloading framework for Dart and Flutter. It provides the essential building blocks—queuing, background task execution, pausing/resuming, and dynamic transport layers—so you don't have to rewrite boilerplate networking logic.
+
+---
+
+## Table of Contents
+- [Features](#features)
+- [Installation](#installation)
+- [Core Architecture](#core-architecture)
+- [Usage Guide](#usage-guide)
+  - [Initialization](#initialization)
+  - [Creating Requests](#creating-requests)
+  - [Lifecycle & Concurrency](#lifecycle--concurrency)
+  - [Progress Tracking](#progress-tracking)
+- [Custom Transports](#custom-transports)
 
 ---
 
 ## Features
 
-- **Concurrency Control**: Limit the maximum number of active downloads to protect memory and network bandwidth.
-- **Lifecycle Management**: Safely pause, resume, or cancel active tasks.
-- **Detailed Progress**: Listen to real-time streams for percentage, downloaded bytes, and network speed.
-- **Transport Agnostic**: Bring your own HTTP client (e.g., `http`, `dio`) by implementing the `DownloadTransport` interface.
-- **Highly Modular**: Designed to be the rock-solid base layer for specialized downloaders (see [`byte_me_hls`](../byte_me_hls)).
+- **Strict Concurrency Control**: Limit active downloads to protect memory and bandwidth. The `DownloadManager` handles the queue automatically.
+- **Resumability**: HTTP Range requests are supported out of the box. Pause and resume large files effortlessly.
+- **Automatic Retries & Exponential Backoff**: Transient network errors are caught, and the engine automatically retries failed chunks safely.
+- **Detailed Progress Stream**: Real-time updates on downloaded bytes, total bytes, elapsed time, and live network speed.
+- **Transport Agnostic**: Use our built-in `DartHttpTransport` (via the `http` package), or write an adapter for `dio` or raw sockets by implementing `DownloadTransport`.
 
 ## Installation
 
@@ -23,80 +36,96 @@ Add `byte_me_core` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  byte_me_core:
-    path: ../byte_me_core
+  byte_me_core: ^1.0.0
 ```
 
-## Quick Start
+## Core Architecture
 
-### 1. Initialize the Engine
-Create your network transport and instantiate the engine and manager.
+- **`DownloadEngine`**: The worker. It handles the actual HTTP requests, file I/O, throttling, and retries.
+- **`DownloadManager`**: The orchestrator. It holds a queue of pending tasks and feeds them to the Engine based on your `maxConcurrentDownloads` limit.
+- **`DownloadTask`**: The wrapper for a specific download job. It provides `Stream`s for progress and status updates.
+
+## Usage Guide
+
+### Initialization
+
+Always start by creating a transport, passing it to an engine, and wrapping it in a manager.
 
 ```dart
 import 'package:byte_me_core/byte_me_core.dart';
 
-// Use the default HTTP transport or provide your own implementation
 final transport = DartHttpTransport();
 final engine = DownloadEngine(transport);
 
-// The DownloadManager handles task queuing and concurrency
+// Allow 3 files to download simultaneously. Any others will queue up.
 final manager = DownloadManager(
   engine: engine, 
-  maxConcurrentDownloads: 3, // Only 3 files will download simultaneously
+  maxConcurrentDownloads: 3, 
 );
 ```
 
-### 2. Create a Request
-Define what you want to download and where it should go.
+### Creating Requests
+
+A request defines *what* to download and *where* to put it.
 
 ```dart
 import 'dart:io';
-import 'package:byte_me_core/byte_me_core.dart';
 
 final request = DownloadRequest(
-  id: 'unique_task_id_1',
-  url: Uri.parse('https://example.com/large_video.mp4'),
-  destination: File('/path/to/save/video.mp4'),
+  id: 'my_unique_download_1',
+  url: Uri.parse('https://example.com/huge_file.zip'),
+  destination: File('/path/to/save/file.zip'),
   headers: {
-    'Authorization': 'Bearer your-token',
+    'Authorization': 'Bearer YOUR_TOKEN',
   },
+  // You can also customize retries here!
+  retryConfig: RetryConfig(maxRetries: 5, baseDelay: Duration(seconds: 2)),
 );
 ```
 
-### 3. Enqueue and Listen
-Turn the request into a task, listen to its progress, and hand it to the manager.
+### Lifecycle & Concurrency
+
+Once you enqueue a task, you can pause, resume, or cancel it dynamically by its ID.
 
 ```dart
 final task = DownloadTask(request: request);
-
-// Listen to network speed and progress
-task.progressStream.listen((progress) {
-  final percent = (progress.percentage * 100).toStringAsFixed(1);
-  final speedMb = (progress.networkSpeed / (1024 * 1024)).toStringAsFixed(2);
-  print('Downloading: $percent% | Speed: $speedMb MB/s');
-});
-
-// Listen to lifecycle changes
-task.statusStream.listen((status) {
-  print('Task Status: ${status.name}');
-});
-
-// Put the task in the queue!
 manager.enqueue(task);
+
+// Later on...
+manager.pause('my_unique_download_1');
+manager.resume('my_unique_download_1');
+manager.cancel('my_unique_download_1');
 ```
 
-## Advanced Usage
+### Progress Tracking
 
-### Pausing and Resuming
-The `DownloadManager` allows you to interact with tasks in the queue using their unique ID.
+Listen to the task's streams to update your UI.
 
 ```dart
-// Pause an active download
-manager.pause('unique_task_id_1');
+task.progressStream.listen((progress) {
+  print('Percent: ${(progress.percentage * 100).toStringAsFixed(1)}%');
+  print('Speed: ${progress.networkSpeed} bytes/sec');
+  print('Downloaded: ${progress.receivedBytes} / ${progress.totalBytes}');
+});
 
-// Resume a paused download
-manager.resume('unique_task_id_1');
+task.statusStream.listen((status) {
+  if (status == DownloadStatus.completed) {
+    print('Download Finished!');
+  } else if (status == DownloadStatus.failed) {
+    print('Download Failed!');
+  }
+});
+```
 
-// Cancel a download completely
-manager.cancel('unique_task_id_1');
+## Custom Transports
+
+Want to use `dio` instead of the standard `http` package? Just implement the `DownloadTransport` interface!
+
+```dart
+class DioTransport implements DownloadTransport {
+  @override
+  Future<DownloadResponse> open(DownloadRequest request) async {
+    // Implement your Dio logic here and return a DownloadResponse stream!
+  }
+}
 ```
