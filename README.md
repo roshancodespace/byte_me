@@ -6,7 +6,7 @@
 
 A highly scalable, modular, and production-ready downloading ecosystem for Dart and Flutter. 
 
-Unlike standard "fire and forget" HTTP libraries, the **Byte Me** ecosystem is built from the ground up to handle massive files, complex media protocols, and highly concurrent workloads without blocking the UI or crashing due to memory exhaustion.
+Unlike standard "fire and forget" HTTP libraries, the **Byte Me** ecosystem is built from the ground up to handle massive files, complex media protocols (like encrypted HLS), and highly concurrent workloads without blocking the UI or crashing due to memory exhaustion. It features a **Global Orchestrator** similar to professional download managers (like 1DM or IDM).
 
 ---
 
@@ -15,8 +15,6 @@ Unlike standard "fire and forget" HTTP libraries, the **Byte Me** ecosystem is b
 - [Why Byte Me?](#why-byte-me)
 - [Installation](#installation)
 - [Getting Started](#getting-started)
-  - [Standard Downloads](#standard-downloads-byte_me_core)
-  - [HLS Video Streams](#hls-video-streams-byte_me_hls)
 - [Architecture](#architecture-overview)
 - [Contributing](#contributing)
 
@@ -24,30 +22,33 @@ Unlike standard "fire and forget" HTTP libraries, the **Byte Me** ecosystem is b
 
 ## Packages
 
-This monorepo is split into focused, single-responsibility packages.
+This monorepo is split into focused, single-responsibility packages. You typically only need to install `byte_me` and optionally `byte_me_hls`.
 
 | Package | Description | Pub |
 |---|---|---|
-| [`byte_me_core`](./packages/byte_me_core) | The foundational download engine. Handles concurrency, task queuing, pausing, resuming, and network abstractions. |
-| [`byte_me_hls`](./packages/byte_me_hls) | A specialized HLS (`.m3u8`) downloader built on the core engine. Handles segment batching, AES-128 decryption, and automatic video stitching. |
+| [`byte_me`](./packages/byte_me) | **The Global Orchestrator**. Use this in your apps! It manages the high-level `DownloadJob` queue and provides zero-boilerplate extensions. |
+| [`byte_me_hls`](./packages/byte_me_hls) | **The HLS Plugin**. Instantly adds the `addHlsVideo` capability to the `byte_me` orchestrator to seamlessly handle `.m3u8` playlists and encryption. |
+| [`byte_me_core`](./packages/byte_me_core) | **The Bare-Metal Engine**. Handles low-level networking, byte chunking, pause/resume mechanisms, and file I/O. |
 
 ## Why Byte Me?
 
-- **Strict Memory Management**: Downloads are streamed directly to disk. We batch segment downloads so large HLS streams never crash your app.
-- **Robust Concurrency**: You dictate exactly how many parallel connections are allowed. The engine queues the rest.
-- **Transport Agnostic**: The engine doesn't care if you use `http`, `dio`, or native sockets. Implement `DownloadTransport` and bring your own networking layer.
-- **Extensible Plugin System**: The core engine is designed to be built upon, exactly as we did with the HLS package.
+- **Global Concurrency Management**: You define how many high-level jobs run at once (`maxConcurrentJobs`). The orchestrator queues everything else.
+- **Strict Memory Management**: Downloads are streamed directly to disk. Even complex HLS videos safely throttle their own internal segments.
+- **Isolate Offloading**: Network and disk I/O are fully isolated on background threads, ensuring 60FPS UI performance.
+- **Zero Boilerplate API**: Progress, speeds, and formatted strings are completely unified across all download types out of the box.
 
 ## Installation
 
-Add the packages you need to your `pubspec.yaml`:
+Add the core orchestrator and (optionally) the HLS plugin to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  byte_me_core:
+  byte_me:
     git:
       url: https://github.com/roshancodespace/byte_me.git
-      path: packages/byte_me_core
+      path: packages/byte_me
+      
+  # Optional: for HLS video support
   byte_me_hls:
     git:
       url: https://github.com/roshancodespace/byte_me.git
@@ -56,108 +57,53 @@ dependencies:
 
 ## Getting Started
 
-### Standard Downloads (`byte_me_core`)
-
-Perfect for simple files, ZIPs, PDFs, or direct MP4s.
+Initialize the global orchestrator once for your app, and then queue up anything you want!
 
 ```dart
+import 'package:byte_me/byte_me.dart';
+import 'package:byte_me_hls/byte_me_hls.dart'; // Unlocks addHlsVideo
 import 'dart:io';
-import 'package:byte_me_core/byte_me_core.dart';
-
-// 1. Initialize the Engine
-final transport = DartHttpTransport();
-final engine = DownloadEngine(transport);
-
-// 2. Setup the Manager with a strict concurrency limit
-final manager = DownloadManager(
-  engine: engine, 
-  maxConcurrentDownloads: 3, 
-);
-
-// 3. Define the Request
-final request = DownloadRequest(
-  id: 'unique_task_id',
-  url: Uri.parse('https://example.com/large_file.zip'),
-  destination: File('/path/to/save/file.zip'),
-);
-
-final task = DownloadTask(request: request);
-
-// Listen to network speed and progress
-task.progressStream.listen((progress) {
-  print('Progress: ${(progress.percentage * 100).toStringAsFixed(1)}%');
-  print('Speed: ${progress.networkSpeed} bytes/sec');
-});
-
-// Enqueue it!
-manager.enqueue(task);
-```
-
-### HLS Video Streams (`byte_me_hls`)
-
-Perfect for offline video playback and DRM-protected or encrypted streams.
-
-```dart
-import 'package:byte_me_core/byte_me_core.dart';
-import 'package:byte_me_hls/byte_me_hls.dart';
 
 void main() async {
-  final transport = DartHttpTransport();
-  final engine = DownloadEngine(transport);
-  
-  // For HLS, this dictates how many .ts segments download simultaneously
-  final manager = DownloadManager(engine: engine, maxConcurrentDownloads: 4);
-  final hlsDownloader = HlsDownloader(manager);
+  // 1. Create the global manager (max 2 active downloads at a time)
+  // isolated() offloads all heavy lifting to a background thread!
+  final manager = DownloadManager.isolated(maxConcurrentJobs: 2);
 
-  await hlsDownloader.downloadHlsVideo(
-    m3u8Url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
-    savePath: '/path/to/save/my_movie.mp4',
-    onProgress: (HlsProgress progress) {
-      print('HLS Progress: ${progress.formattedPercentage} | Speed: ${progress.formattedSpeed}');
-      print('Segments: ${progress.completedSegments}/${progress.totalSegments}');
-    },
+  // 2. Queue a standard file
+  final fileJob = manager.addFile(
+    DownloadRequest(
+      id: 'pdf_1',
+      url: Uri.parse('https://example.com/large_document.pdf'),
+      destination: File('/path/to/save/document.pdf'),
+    )
   );
 
-  print('Video download and stitching complete!');
+  // 3. Queue an entire HLS Video Stream (Requires byte_me_hls plugin)
+  final hlsJob = manager.addHlsVideo(
+    id: 'movie_1',
+    m3u8Url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+    savePath: '/path/to/save/my_movie.mp4',
+    maxConcurrentSegments: 5, // Uses 5 internal connections just for this video
+  );
+
+  // 4. Listen to unified progress on any job
+  hlsJob.progressStream.listen((progress) {
+    print('Progress: ${progress.formattedPercentage}'); // "45.2%"
+    print('Speed: ${progress.formattedSpeed}');       // "1.2 MB/s"
+  });
+
+  // 5. Control jobs globally
+  manager.pause('movie_1');
+  manager.resume('movie_1');
+  manager.cancel('pdf_1');
 }
 ```
 
 ## Architecture Overview
 
-```mermaid
-flowchart TB
-    classDef core fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000
-    classDef hls fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,color:#000
-    classDef app fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px,color:#000
-    classDef io fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
-
-    App([📱 Your Application]):::app
-
-    subgraph ByteMeCore [📦 byte_me_core]
-        Manager{DownloadManager}:::core
-        Engine[DownloadEngine]:::core
-        Transport[[DownloadTransport]]:::core
-    end
-
-    subgraph ByteMeHLS [🎞️ byte_me_hls]
-        HlsDownloader[HlsDownloader]:::hls
-        Parser(M3U8 Parser):::hls
-        Decrypter(AES Decrypter):::hls
-    end
-
-    Disk[(💾 Local Storage)]:::io
-
-    App ==>|1. Standard Download| Manager
-    App ==>|2. HLS Stream| HlsDownloader
-
-    HlsDownloader -->|Parses Playlist| Parser
-    HlsDownloader -->|Enqueues Segments| Manager
-    HlsDownloader -.->|Decrypts Segments| Decrypter
-
-    Manager -->|Feeds Tasks| Engine
-    Engine -->|Opens Connection| Transport
-    Transport -->|Streams Bytes| Disk
-```
+1. **`byte_me`**: The high-level orchestrator. It manages the queue of `DownloadJob`s.
+2. **`byte_me_core`**: The low-level engine. Used internally to handle raw byte streams, HTTP ranges, and exponential backoff.
+3. **`byte_me_hls`**: A plugin that provides `HlsDownloadJob`. It automatically parses m3u8 playlists, spawns internal sub-queues for segments, decrypts AES-128 chunks, and stitches them together seamlessly!
 
 ## Contributing
 We welcome contributions! Please open an issue before submitting a large pull request to discuss the changes you wish to make.
