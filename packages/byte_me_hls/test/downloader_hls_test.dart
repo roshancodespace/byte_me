@@ -1,28 +1,34 @@
-import 'package:byte_me_core/byte_me_core.dart';
-import 'package:byte_me_hls/src/hls_downloader.dart';
+import 'package:byte_me/byte_me.dart';
+import 'package:byte_me_hls/byte_me_hls.dart';
 import 'package:test/test.dart';
 import 'test_utils.dart';
 
 void main() {
   test('Downloads a HLS file', () async {
-    final transport = DartHttpTransport();
-    final engine = DownloadEngine(transport);
-    final manager = DownloadManager(engine: engine, maxConcurrentDownloads: 10);
-
-    final hlsDownloader = HlsDownloader(manager);
+    final manager = DownloadManager.isolated(maxConcurrentJobs: 1);
     final destFile = getDumpFile('hls_sample.mp4');
 
     print('Starting HLS Download...');
 
-    await hlsDownloader.downloadHlsVideo(
+    final job = manager.addHlsVideo(
+      id: 'hls_test_1',
       m3u8Url:
           'https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8',
       savePath: destFile.path,
-      onProgress: (progress) {
-        print(
-          'HLS Downloading: ${progress.formattedPercentage}, Speed: ${progress.formattedSpeed}, Segments: ${progress.completedSegments}/${progress.totalSegments}',
-        );
-      },
+      maxConcurrentSegments: 10,
+    );
+
+    job.progressStream.listen((progress) {
+      print(
+        'HLS Downloading: ${progress.formattedPercentage}, Speed: ${progress.formattedSpeed}, Segments: ${progress.receivedBytes}/${progress.totalBytes}',
+      );
+    });
+
+    await job.statusStream.firstWhere(
+      (s) =>
+          s == DownloadStatus.completed ||
+          s == DownloadStatus.failed ||
+          s == DownloadStatus.cancelled,
     );
 
     print('HLS Download complete: ${destFile.path}');

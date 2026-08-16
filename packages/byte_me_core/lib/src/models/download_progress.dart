@@ -33,4 +33,20 @@ class DownloadProgress {
     final secondsRemaining = remainingBytes / networkSpeed;
     return Duration(seconds: secondsRemaining.toInt());
   }
+
+  /// Returns a human-readable percentage string (e.g., "45.2%").
+  String get formattedPercentage {
+    return '${(percentage * 100).toStringAsFixed(1)}%';
+  }
+
+  /// Returns a human-readable network speed string (e.g., "1.2 MB/s").
+  String get formattedSpeed {
+    if (networkSpeed > 1024 * 1024) {
+      return '${(networkSpeed / (1024 * 1024)).toStringAsFixed(2)} MB/s';
+    } else if (networkSpeed > 1024) {
+      return '${(networkSpeed / 1024).toStringAsFixed(2)} KB/s';
+    } else {
+      return '${networkSpeed.toStringAsFixed(0)} B/s';
+    }
+  }
 }

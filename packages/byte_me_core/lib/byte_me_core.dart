@@ -1,8 +1,8 @@
 library;
 
 // Expose the main orchestrator
-export 'src/engine/download_manager.dart';
 export 'src/engine/download_engine.dart';
+export 'src/engine/isolated_download_engine.dart';
 
 // Expose all public data models
 export 'src/models/download_error.dart';

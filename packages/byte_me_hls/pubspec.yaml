@@ -9,6 +9,8 @@ environment:
 dependencies:
   byte_me_core:
     path: ../byte_me_core
+  byte_me:
+    path: ../byte_me
 
   http: ^1.2.0
   path: ^1.9.0

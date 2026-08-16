@@ -2,36 +2,30 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-A specialized, high-performance HTTP Live Streaming (HLS) downloader for Dart and Flutter. 
+A specialized, high-performance HTTP Live Streaming (HLS) plugin for the `byte_me` orchestrator ecosystem.
 
-Built on top of `byte_me_core`, this package abstracts away the immense complexity of downloading HLS streams. It handles playlist parsing, segment extraction, concurrent downloading, on-the-fly decryption, and final video stitching—all in just a few lines of code.
-
----
-
-## Table of Contents
-- [Features](#features)
-- [Installation](#installation)
-- [How It Works](#how-it-works)
-- [Usage Guide](#usage-guide)
-  - [Initialization](#initialization)
-  - [Downloading & Progress](#downloading--progress)
+This package abstracts away the immense complexity of downloading HLS streams. It handles playlist parsing, segment extraction, concurrent downloading, on-the-fly decryption, and final video stitching—all fully integrated into the `byte_me` global queue.
 
 ---
 
 ## Features
 
+- **Global Integration**: Implements the `DownloadJob` interface, meaning your HLS videos share the same global queue, concurrency rules, and status streams as standard file downloads!
 - **Master & Media Playlist Parsing**: Intelligently parses `.m3u8` files to find video segments.
-- **Concurrent Batching**: Downloads `.ts` segments in parallel async batches. This saturates your network bandwidth without flooding your device's memory.
+- **Concurrent Batching**: Downloads `.ts` segments in parallel async batches using an internal segment queue, without clogging up your top-level `byte_me` video queue!
 - **AES-128 Decryption**: Automatically detects encrypted streams, fetches the decryption keys, and decrypts segments on the fly.
 - **Automatic File Stitching**: Combines thousands of scattered video segments into a single, cohesive `.mp4` or `.ts` file ready for offline playback.
-- **Rich Progress API**: Emits an `HlsProgress` object containing completed segments, total segments, and aggregated network speed across all active batch workers.
 
 ## Installation
 
-Add `byte_me_hls` to your `pubspec.yaml` (it automatically depends on `byte_me_core`):
+Add both `byte_me` and `byte_me_hls` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
+  byte_me:
+    git:
+      url: https://github.com/roshancodespace/byte_me.git
+      path: packages/byte_me
   byte_me_hls:
     git:
       url: https://github.com/roshancodespace/byte_me.git
@@ -42,71 +36,85 @@ dependencies:
 
 Downloading an HLS stream is fundamentally different from a standard file download because the video is broken into hundreds or thousands of tiny `.ts` segments. 
 
-If a downloader queues all 1,000 segments into memory at once, the application will crash. `byte_me_hls` solves this by:
-1. Parsing the `.m3u8` file to map the segments.
-2. Spawning a controlled number of async "workers" (based on your `maxConcurrentDownloads`).
-3. Each worker safely grabs a segment, downloads it using `byte_me_core`, and decrypts it to a temporary directory.
-4. Once all segments are downloaded, they are sequentially stitched into a single file, and the temporary directory is wiped.
+If a downloader queues all 1,000 segments into memory at once, the application will crash. `byte_me_hls` solves this by natively integrating with `byte_me`. When an `HlsDownloadJob` begins execution, it spawns its *own* internal sub-queue to safely throttle segment downloads while the top-level queue manages high-level video streams.
 
 ## Usage Guide
 
 ### Initialization
 
-Because `byte_me_hls` relies on the core engine, you must initialize `byte_me_core` first.
+Because `byte_me_hls` acts as a plugin, it automatically injects an `addHlsVideo` extension method onto the `DownloadManager`!
 
 ```dart
-import 'package:byte_me_core/byte_me_core.dart';
-import 'package:byte_me_hls/byte_me_hls.dart';
+import 'package:byte_me/byte_me.dart';
+import 'package:byte_me_hls/byte_me_hls.dart'; // Unlocks the extension
 
-// Initialize the core engine
-final transport = DartHttpTransport();
-final engine = DownloadEngine(transport);
-
-// The concurrency limit here dictates exactly how many HLS segments 
-// will be downloaded at the exact same time. 
-// We recommend a value between 4 and 8 for optimal HLS performance.
-final manager = DownloadManager(engine: engine, maxConcurrentDownloads: 4);
-
-// Initialize the specialized HLS downloader
-final hlsDownloader = HlsDownloader(manager);
+// The global orchestrator (allows 2 videos/files to download simultaneously)
+final manager = DownloadManager.isolated(maxConcurrentJobs: 2);
 ```
 
-### Downloading & Progress
-
-To download a stream, provide the master playlist URL and the destination file path.
+### Queueing an HLS Video
 
 ```dart
-await hlsDownloader.downloadHlsVideo(
+// Enqueue the video into the global manager
+final hlsJob = manager.addHlsVideo(
+  id: 'unique_video_id',
   m3u8Url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
   savePath: '/path/to/save/offline_movie.mp4',
   
-  // Optional headers for authentication (passed to both the playlist and segment requests)
+  // This video will internally use 5 connections to download its segments
+  maxConcurrentSegments: 5,
+  
+  // Optional headers for authentication
   headers: {
     'Authorization': 'Bearer YOUR_TOKEN'
   },
-  
-  // Real-time progress updates
-  onProgress: (HlsProgress progress) {
-    // Easily display progress in your UI
-    print('HLS Progress: ${progress.formattedPercentage}');
-    print('Segments: ${progress.completedSegments}/${progress.totalSegments}');
-    
-    // Aggregated speed across all active segment workers
-    print('Speed: ${progress.formattedSpeed}');
-  },
 );
 
-print('🎉 Video downloaded, stitched, and ready for playback!');
+// Real-time progress updates are completely unified with standard downloads!
+hlsJob.progressStream.listen((progress) {
+  print('HLS Progress: ${progress.formattedPercentage}');
+  print('Speed: ${progress.formattedSpeed}');
+  
+  // For HLS, totalBytes refers to total segments!
+  print('Segments: ${progress.receivedBytes}/${progress.totalBytes}');
+});
+
+hlsJob.statusStream.listen((status) {
+  if (status == DownloadStatus.completed) {
+    print('🎉 Video downloaded, stitched, and ready for playback!');
+  }
+});
 ```
 
-### Pausing & Resuming
+### Advanced: Skipping Built-in Remuxing (FFmpeg integration)
 
-You can easily pause and resume an active HLS download by calling the respective methods on the `HlsDownloader` instance. This will safely suspend the active segment workers without losing downloaded data.
+If you don't want the package to naively concatenate the segments (e.g., if you want to remux the segments yourself using FFmpeg, bind subtitles, or change the container format), you can set `stitch: false`.
+
+When `stitch: false`, the `savePath` acts as a directory where the decrypted `.ts` segments will be saved. We will also automatically generate a `segments.txt` file ready for FFmpeg.
 
 ```dart
-// Pause the download
-hlsDownloader.pause();
+final hlsJob = manager.addHlsVideo(
+  id: 'unstitched_video',
+  m3u8Url: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+  savePath: '/path/to/save/segments_folder', // Treat as directory
+  stitch: false,
+);
 
-// Resume the download
-hlsDownloader.resume();
+// Wait for completion... then run FFmpeg manually on the generated segments.txt:
+// ffmpeg -f concat -safe 0 -i /path/to/save/segments_folder/segments.txt -c copy output.mp4
+```
+
+### Pausing, Resuming & Cancelling
+
+You can manage the lifecycle using the global `manager`, or directly on the `hlsJob` instance. All commands safely suspend the internal segment workers without losing downloaded data.
+
+```dart
+// Pause the download globally
+manager.pause('unique_video_id');
+
+// Resume the download globally
+manager.resume('unique_video_id');
+
+// Cancel the download completely
+manager.cancel('unique_video_id');
 ```

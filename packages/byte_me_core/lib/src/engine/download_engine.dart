@@ -9,11 +9,18 @@ import '../models/download_status.dart';
 import '../models/download_task.dart';
 import '../transport/download_transport.dart';
 
-class DownloadEngine {
+abstract interface class DownloadEngine {
+  factory DownloadEngine(DownloadTransport transport) = DefaultDownloadEngine;
+
+  Future<DownloadResult> executeTask(DownloadTask task);
+}
+
+class DefaultDownloadEngine implements DownloadEngine {
   final DownloadTransport _transport;
 
-  DownloadEngine(this._transport);
+  DefaultDownloadEngine(this._transport);
 
+  @override
   Future<DownloadResult> executeTask(DownloadTask task) async {
     int attempts = 0;
     final maxRetries = task.request.retryConfig.maxRetries;
