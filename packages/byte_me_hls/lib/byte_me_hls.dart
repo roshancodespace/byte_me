@@ -20,7 +20,7 @@ extension HlsDownloadManagerExt on DownloadManager {
       id: id,
       m3u8Url: m3u8Url,
       savePath: savePath,
-      segmentEngine: defaultEngine, // Natively use the core default engine for segments
+      segmentEngine: DownloadEngine(DartHttpTransport()),
       stitch: stitch,
       headers: headers,
       maxConcurrentSegments: maxConcurrentSegments,

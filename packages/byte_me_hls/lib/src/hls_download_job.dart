@@ -132,6 +132,7 @@ class HlsDownloadJob implements DownloadJob {
       if (segments.isEmpty) throw Exception("Empty playlist");
 
       int completedSegments = 0;
+      int completedSegmentsBytes = 0;
       final iterator = segments.indexed.iterator;
 
       final stopwatch = Stopwatch()..start();
@@ -151,16 +152,34 @@ class HlsDownloadJob implements DownloadJob {
           lastSpeedUpdateMs = nowMs;
         }
 
-        // HLS specific progress trick: we use percentage to represent segments
-        // and keep standard fields so it conforms to the interface.
-        final percentage = completedSegments / segments.length;
+        double activeFraction = 0;
+        for (final t in _activeTasks) {
+          activeFraction += t.progress.percentage;
+        }
+
+        final double fractionalSegments = completedSegments + activeFraction;
+        final double percentage = segments.isEmpty
+            ? 0
+            : fractionalSegments / segments.length;
+
+        int estimatedTotalBytes = 0;
+        if (completedSegments > 0) {
+          final avgBytesPerSegment = completedSegmentsBytes / completedSegments;
+          estimatedTotalBytes = (avgBytesPerSegment * segments.length).round();
+        } else {
+          estimatedTotalBytes = percentage > 0
+              ? (totalBytesReceived / percentage).round()
+              : 0;
+        }
+
+        if (estimatedTotalBytes < totalBytesReceived) {
+          estimatedTotalBytes = totalBytesReceived;
+        }
 
         _updateProgress(
           DownloadProgress(
             receivedBytes: totalBytesReceived,
-            totalBytes:
-                (totalBytesReceived / (percentage == 0 ? 0.01 : percentage))
-                    .round(),
+            totalBytes: estimatedTotalBytes,
             elapsedTime: Duration(milliseconds: nowMs),
             networkSpeed: currentSpeed,
           ),
@@ -223,6 +242,7 @@ class HlsDownloadJob implements DownloadJob {
           }
 
           completedSegments++;
+          completedSegmentsBytes += previousBytes;
           emitProgress();
         }
       }
