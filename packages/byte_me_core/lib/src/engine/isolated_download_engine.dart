@@ -17,16 +17,13 @@ class IsolatedDownloadEngine implements DownloadEngine {
   @override
   Future<DownloadResult> executeTask(DownloadTask task) async {
     final receivePort = ReceivePort();
-    
+
     // Spawn the background isolate
-    await Isolate.spawn(
-      _isolateMain,
-      {
-        'sendPort': receivePort.sendPort,
-        'request': task.request,
-        'transportBuilder': transportBuilder,
-      },
-    );
+    await Isolate.spawn(_isolateMain, {
+      'sendPort': receivePort.sendPort,
+      'request': task.request,
+      'transportBuilder': transportBuilder,
+    });
 
     SendPort? commandPort;
     final completer = Completer<DownloadResult>();
@@ -34,9 +31,9 @@ class IsolatedDownloadEngine implements DownloadEngine {
     // Wire up UI cancellation to the background isolate
     task.attachCancelStrategy(() {
       if (task.status == DownloadStatus.paused) {
-         commandPort?.send('pause');
+        commandPort?.send('pause');
       } else if (task.status == DownloadStatus.cancelled) {
-         commandPort?.send('cancel');
+        commandPort?.send('cancel');
       }
     });
 
@@ -49,6 +46,14 @@ class IsolatedDownloadEngine implements DownloadEngine {
       } else if (message is DownloadStatus) {
         task.updateStatus(message);
       } else if (message is DownloadResult) {
+        if (message.isSuccess && task.status != DownloadStatus.completed) {
+          task.updateStatus(DownloadStatus.completed);
+        } else if (!message.isSuccess &&
+            task.status != DownloadStatus.failed &&
+            task.status != DownloadStatus.cancelled &&
+            task.status != DownloadStatus.paused) {
+          task.updateStatus(DownloadStatus.failed);
+        }
         completer.complete(message);
         receivePort.close();
       }
@@ -61,7 +66,8 @@ class IsolatedDownloadEngine implements DownloadEngine {
   static void _isolateMain(Map<String, dynamic> args) async {
     final sendPort = args['sendPort'] as SendPort;
     final request = args['request'] as DownloadRequest;
-    final transportBuilder = args['transportBuilder'] as DownloadTransport Function();
+    final transportBuilder =
+        args['transportBuilder'] as DownloadTransport Function();
 
     // Give the main thread a way to send us cancel/pause commands
     final commandPort = ReceivePort();
@@ -82,7 +88,7 @@ class IsolatedDownloadEngine implements DownloadEngine {
 
     // Run the heavy network + IOSink write
     final result = await engine.executeTask(task);
-    
+
     sendPort.send(result);
     commandPort.close();
   }
