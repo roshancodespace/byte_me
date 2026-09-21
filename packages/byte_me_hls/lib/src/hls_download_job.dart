@@ -178,20 +178,20 @@ class HlsDownloadJob implements DownloadJob {
                 ? (totalBytesReceived / percentage).round()
                 : 0;
           }
-
-          if (estimatedTotalBytes < totalBytesReceived) {
-            estimatedTotalBytes = totalBytesReceived;
-          }
-
-          _updateProgress(
-            DownloadProgress(
-              receivedBytes: totalBytesReceived,
-              totalBytes: estimatedTotalBytes,
-              elapsedTime: Duration(milliseconds: nowMs),
-              networkSpeed: currentSpeed,
-            ),
-          );
         }
+
+        if (estimatedTotalBytes < totalBytesReceived) {
+          estimatedTotalBytes = totalBytesReceived;
+        }
+
+        _updateProgress(
+          DownloadProgress(
+            receivedBytes: totalBytesReceived,
+            totalBytes: estimatedTotalBytes,
+            elapsedTime: Duration(milliseconds: nowMs),
+            networkSpeed: currentSpeed,
+          ),
+        );
       }
 
       Future<void> worker() async {
