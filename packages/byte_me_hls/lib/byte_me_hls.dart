@@ -15,6 +15,7 @@ extension HlsDownloadManagerExt on DownloadManager {
     bool stitch = true,
     int maxConcurrentSegments = 5,
     Map<String, String>? headers,
+    int? totalSize,
   }) {
     final job = HlsDownloadJob(
       id: id,
@@ -24,6 +25,7 @@ extension HlsDownloadManagerExt on DownloadManager {
       stitch: stitch,
       headers: headers,
       maxConcurrentSegments: maxConcurrentSegments,
+      providedTotalSize: totalSize,
     );
     enqueue(job);
     return job;

@@ -19,6 +19,7 @@ class HlsDownloadJob implements DownloadJob {
   final bool stitch;
   final Map<String, String>? headers;
   final int maxConcurrentSegments;
+  final int? providedTotalSize;
 
   final DownloadEngine _segmentEngine;
   late final DownloadManager _internalManager;
@@ -46,6 +47,7 @@ class HlsDownloadJob implements DownloadJob {
     this.stitch = true,
     this.headers,
     this.maxConcurrentSegments = 5,
+    this.providedTotalSize,
   }) : _segmentEngine = segmentEngine {
     _internalManager = DownloadManager(
       defaultEngine: _segmentEngine,
@@ -163,27 +165,33 @@ class HlsDownloadJob implements DownloadJob {
             : fractionalSegments / segments.length;
 
         int estimatedTotalBytes = 0;
-        if (completedSegments > 0) {
-          final avgBytesPerSegment = completedSegmentsBytes / completedSegments;
-          estimatedTotalBytes = (avgBytesPerSegment * segments.length).round();
+        if (providedTotalSize != null && providedTotalSize! > 0) {
+          estimatedTotalBytes = providedTotalSize!;
         } else {
-          estimatedTotalBytes = percentage > 0
-              ? (totalBytesReceived / percentage).round()
-              : 0;
-        }
+          if (completedSegments > 0) {
+            final avgBytesPerSegment =
+                completedSegmentsBytes / completedSegments;
+            estimatedTotalBytes = (avgBytesPerSegment * segments.length)
+                .round();
+          } else {
+            estimatedTotalBytes = percentage > 0
+                ? (totalBytesReceived / percentage).round()
+                : 0;
+          }
 
-        if (estimatedTotalBytes < totalBytesReceived) {
-          estimatedTotalBytes = totalBytesReceived;
-        }
+          if (estimatedTotalBytes < totalBytesReceived) {
+            estimatedTotalBytes = totalBytesReceived;
+          }
 
-        _updateProgress(
-          DownloadProgress(
-            receivedBytes: totalBytesReceived,
-            totalBytes: estimatedTotalBytes,
-            elapsedTime: Duration(milliseconds: nowMs),
-            networkSpeed: currentSpeed,
-          ),
-        );
+          _updateProgress(
+            DownloadProgress(
+              receivedBytes: totalBytesReceived,
+              totalBytes: estimatedTotalBytes,
+              elapsedTime: Duration(milliseconds: nowMs),
+              networkSpeed: currentSpeed,
+            ),
+          );
+        }
       }
 
       Future<void> worker() async {
