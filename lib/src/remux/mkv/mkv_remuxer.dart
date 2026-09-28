@@ -264,32 +264,41 @@ class MkvRemuxer implements Remuxer {
     List<EsFrame> audioFrames,
     Map<int, List<SubtitleFrame>> parsedSubtitles,
   ) {
+    // 1. Calculate base PTS exclusively from video and audio frames
+    // This removes the arbitrary MPEG-TS offset so they align with 0-based subtitles
+    int basePtsMs = 0x7FFFFFFFFFFFFFFF;
+    for (final f in videoFrames) {
+      if (f.ptsMs != null && f.ptsMs! < basePtsMs) basePtsMs = f.ptsMs!;
+    }
+    for (final f in audioFrames) {
+      if (f.ptsMs != null && f.ptsMs! < basePtsMs) basePtsMs = f.ptsMs!;
+    }
+    if (basePtsMs == 0x7FFFFFFFFFFFFFFF) basePtsMs = 0;
+
     int frameIndex = 0;
-    // Interpolate missing timestamps and merge all frames
     final allFrames = <_TaggedFrame>[];
 
     int lastVideoPts = 0;
     int lastVideoDts = 0;
     for (final f in videoFrames) {
-      final pts =
-          f.ptsMs ?? (lastVideoPts + 41); // Assume ~24fps (41ms) if missing
-      final dts = f.dtsMs ?? (lastVideoDts + 41);
-      lastVideoPts = pts;
-      lastVideoDts = dts;
+      final rawPts = f.ptsMs ?? (lastVideoPts + 41);
+      final rawDts = f.dtsMs ?? (lastVideoDts + 41);
+      lastVideoPts = rawPts;
+      lastVideoDts = rawDts;
 
-      // We pass the interpolated values via a new EsFrame, or just override in TaggedFrame
-      // Wait, _TaggedFrame gets its ptsMs from frame!.ptsMs. We can't modify EsFrame easily.
-      // Let's create an interpolated TaggedFrame.
+      final pts = rawPts - basePtsMs;
+      final dts = rawDts - basePtsMs;
+
       allFrames.add(_TaggedFrame(f, 1, true, null, frameIndex++, pts, dts));
     }
 
     final audioTrackNum = videoFrames.isNotEmpty ? 2 : 1;
     int lastAudioPts = 0;
     for (final f in audioFrames) {
-      final pts =
-          f.ptsMs ??
-          (lastAudioPts + 23); // Assume AAC 1024 samples @ 44.1kHz (23ms)
-      lastAudioPts = pts;
+      final rawPts = f.ptsMs ?? (lastAudioPts + 23);
+      lastAudioPts = rawPts;
+
+      final pts = rawPts - basePtsMs;
 
       allFrames.add(
         _TaggedFrame(f, audioTrackNum, false, null, frameIndex++, pts, pts),
@@ -324,14 +333,7 @@ class MkvRemuxer implements Remuxer {
 
     if (allFrames.isEmpty) return;
 
-    // Determine base PTS (minimum PTS in the entire file) to ensure unsigned cluster timecodes
-    int basePtsMs = 0x7FFFFFFFFFFFFFFF;
-    for (final f in allFrames) {
-      if (f.ptsMs != null && f.ptsMs! < basePtsMs) {
-        basePtsMs = f.ptsMs!;
-      }
-    }
-    if (basePtsMs == 0x7FFFFFFFFFFFFFFF) basePtsMs = 0;
+    if (allFrames.isEmpty) return;
 
     int clusterTimecodeMs = 0;
     BytesBuilder? clusterContent;
@@ -345,9 +347,7 @@ class MkvRemuxer implements Remuxer {
     }
 
     for (final tagged in allFrames) {
-      final frameMs = tagged.ptsMs != null
-          ? (tagged.ptsMs! - basePtsMs)
-          : clusterTimecodeMs;
+      final frameMs = tagged.ptsMs ?? clusterTimecodeMs;
 
       // Start new cluster at keyframes or when relative timecode overflows int16
       final needNewCluster =
