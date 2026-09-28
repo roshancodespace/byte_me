@@ -40,4 +40,5 @@ export 'src/downloader.dart';
 export 'src/remux/remuxer.dart';
 export 'src/remux/concat_remuxer.dart';
 export 'src/remux/mkv/mkv_remuxer.dart';
+export 'src/remux/ffmpeg_remuxer.dart';
 export 'src/remux/mkv/subtitles/subtitle_track.dart';

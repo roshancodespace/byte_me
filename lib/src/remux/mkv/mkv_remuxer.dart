@@ -78,6 +78,25 @@ class MkvRemuxer implements Remuxer {
     final sink = output.openWrite();
 
     try {
+      // Calculate estimated duration
+      int minPts = 0x7FFFFFFFFFFFFFFF;
+      int maxPts = 0;
+      for (final f in allVideoFrames) {
+        if (f.ptsMs != null) {
+          if (f.ptsMs! < minPts) minPts = f.ptsMs!;
+          if (f.ptsMs! > maxPts) maxPts = f.ptsMs!;
+        }
+      }
+      for (final f in allAudioFrames) {
+        if (f.ptsMs != null) {
+          if (f.ptsMs! < minPts) minPts = f.ptsMs!;
+          if (f.ptsMs! > maxPts) maxPts = f.ptsMs!;
+        }
+      }
+      final double durationMs = minPts != 0x7FFFFFFFFFFFFFFF && maxPts > minPts
+          ? (maxPts - minPts).toDouble()
+          : 0;
+
       // EBML Header
       sink.add(_buildEbmlHeader());
 
@@ -85,7 +104,7 @@ class MkvRemuxer implements Remuxer {
       sink.add(Ebml.containerHeaderUnknown(Ebml.segment));
 
       // Segment Info
-      sink.add(_buildSegmentInfo());
+      sink.add(_buildSegmentInfo(durationMs));
 
       // Tracks
       sink.add(_buildTracks(sps, pps, aacConfig, subtitleConfigs));
@@ -112,10 +131,11 @@ class MkvRemuxer implements Remuxer {
     return Ebml.element(Ebml.ebmlHeader, content);
   }
 
-  static Uint8List _buildSegmentInfo() {
+  static Uint8List _buildSegmentInfo(double durationMs) {
     final content = _concat([
       // TimecodeScale: 1,000,000 ns = 1ms per cluster timecode tick
       Ebml.uintElement(Ebml.timecodeScale, 1000000),
+      if (durationMs > 0) Ebml.floatElement(Ebml.segmentDuration, durationMs),
       Ebml.stringElement(Ebml.muxingApp, 'byte_me'),
       Ebml.stringElement(Ebml.writingApp, 'byte_me'),
     ]);
@@ -244,41 +264,74 @@ class MkvRemuxer implements Remuxer {
     List<EsFrame> audioFrames,
     Map<int, List<SubtitleFrame>> parsedSubtitles,
   ) {
-    // Merge and sort all frames by PTS
+    int frameIndex = 0;
+    // Interpolate missing timestamps and merge all frames
     final allFrames = <_TaggedFrame>[];
+
+    int lastVideoPts = 0;
+    int lastVideoDts = 0;
     for (final f in videoFrames) {
-      allFrames.add(_TaggedFrame(f, 1, true, null));
+      final pts =
+          f.ptsMs ?? (lastVideoPts + 41); // Assume ~24fps (41ms) if missing
+      final dts = f.dtsMs ?? (lastVideoDts + 41);
+      lastVideoPts = pts;
+      lastVideoDts = dts;
+
+      // We pass the interpolated values via a new EsFrame, or just override in TaggedFrame
+      // Wait, _TaggedFrame gets its ptsMs from frame!.ptsMs. We can't modify EsFrame easily.
+      // Let's create an interpolated TaggedFrame.
+      allFrames.add(_TaggedFrame(f, 1, true, null, frameIndex++, pts, dts));
     }
 
     final audioTrackNum = videoFrames.isNotEmpty ? 2 : 1;
+    int lastAudioPts = 0;
     for (final f in audioFrames) {
-      allFrames.add(_TaggedFrame(f, audioTrackNum, false, null));
+      final pts =
+          f.ptsMs ??
+          (lastAudioPts + 23); // Assume AAC 1024 samples @ 44.1kHz (23ms)
+      lastAudioPts = pts;
+
+      allFrames.add(
+        _TaggedFrame(f, audioTrackNum, false, null, frameIndex++, pts, pts),
+      );
     }
 
     for (final entry in parsedSubtitles.entries) {
       final trackNum = entry.key;
       for (final sf in entry.value) {
-        allFrames.add(_TaggedFrame(null, trackNum, false, sf));
+        allFrames.add(
+          _TaggedFrame(
+            null,
+            trackNum,
+            false,
+            sf,
+            frameIndex++,
+            sf.startTimeMs,
+            sf.startTimeMs,
+          ),
+        );
       }
     }
 
-    // Sort by PTS (frames without PTS go after those with PTS)
+    // Sort by DTS to preserve decode order, fallback to index for stability
     allFrames.sort((a, b) {
-      final aPts = a.ptsMs ?? 0x7FFFFFFFFFFFFFFF;
-      final bPts = b.ptsMs ?? 0x7FFFFFFFFFFFFFFF;
-      return aPts.compareTo(bPts);
+      final aDts = a.dtsMs ?? 0x7FFFFFFFFFFFFFFF;
+      final bDts = b.dtsMs ?? 0x7FFFFFFFFFFFFFFF;
+      final cmp = aDts.compareTo(bDts);
+      if (cmp != 0) return cmp;
+      return a.index.compareTo(b.index);
     });
 
     if (allFrames.isEmpty) return;
 
-    // Determine base PTS for relative timecodes
-    int basePtsMs = 0;
+    // Determine base PTS (minimum PTS in the entire file) to ensure unsigned cluster timecodes
+    int basePtsMs = 0x7FFFFFFFFFFFFFFF;
     for (final f in allFrames) {
-      if (f.ptsMs != null) {
+      if (f.ptsMs != null && f.ptsMs! < basePtsMs) {
         basePtsMs = f.ptsMs!;
-        break;
       }
     }
+    if (basePtsMs == 0x7FFFFFFFFFFFFFFF) basePtsMs = 0;
 
     int clusterTimecodeMs = 0;
     BytesBuilder? clusterContent;
@@ -292,17 +345,20 @@ class MkvRemuxer implements Remuxer {
     }
 
     for (final tagged in allFrames) {
-      final frameMs = tagged.ptsMs != null ? (tagged.ptsMs! - basePtsMs) : 0;
+      final frameMs = tagged.ptsMs != null
+          ? (tagged.ptsMs! - basePtsMs)
+          : clusterTimecodeMs;
 
       // Start new cluster at keyframes or when relative timecode overflows int16
       final needNewCluster =
           clusterContent == null ||
           (tagged.isVideo && tagged.frame!.isKeyframe) ||
-          (frameMs - clusterTimecodeMs > 30000); // ~30s max cluster
+          (frameMs - clusterTimecodeMs > 30000) ||
+          (frameMs - clusterTimecodeMs < -32768);
 
       if (needNewCluster) {
         flushCluster();
-        clusterTimecodeMs = frameMs;
+        clusterTimecodeMs = frameMs > 0 ? frameMs : 0;
         clusterContent = BytesBuilder(copy: false);
         clusterContent!.add(
           Ebml.uintElement(Ebml.clusterTimecode, clusterTimecodeMs),
@@ -363,9 +419,22 @@ class _TaggedFrame {
   final SubtitleFrame? subtitleFrame;
   final int trackNumber;
   final bool isVideo;
+  final int index; // Preserve original stream order for stability
 
-  _TaggedFrame(this.frame, this.trackNumber, this.isVideo, this.subtitleFrame);
+  final int _pts;
+  final int _dts;
+
+  _TaggedFrame(
+    this.frame,
+    this.trackNumber,
+    this.isVideo,
+    this.subtitleFrame,
+    this.index,
+    this._pts,
+    this._dts,
+  );
 
   bool get isSubtitle => subtitleFrame != null;
-  int? get ptsMs => isSubtitle ? subtitleFrame!.startTimeMs : frame!.ptsMs;
+  int? get ptsMs => _pts;
+  int? get dtsMs => _dts;
 }

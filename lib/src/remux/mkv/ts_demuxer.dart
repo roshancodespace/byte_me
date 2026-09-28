@@ -117,11 +117,17 @@ class TsDemuxer {
     final dataStart = 9 + headerDataLen;
     if (dataStart > pesData.length) return;
 
-    // Extract PTS
+    // Extract PTS and DTS
     final ptsDtsFlags = (pesData[7] >> 6) & 0x03;
     int? pts;
+    int? dts;
     if (ptsDtsFlags >= 2 && pesData.length >= 14) {
       pts = _parsePts(pesData, 9);
+    }
+    if (ptsDtsFlags == 3 && pesData.length >= 19) {
+      dts = _parsePts(pesData, 14);
+    } else {
+      dts = pts;
     }
 
     final esData = Uint8List.sublistView(pesData, dataStart);
@@ -129,10 +135,10 @@ class TsDemuxer {
 
     if (assembler.streamType == 0x1B) {
       // H.264
-      _parseH264Nalus(esData, pts, result);
+      _parseH264Nalus(esData, pts, dts, result);
     } else if (assembler.streamType == 0x0F) {
       // AAC ADTS
-      _parseAacFrames(esData, pts, result);
+      _parseAacFrames(esData, pts, dts, result);
     }
   }
 
@@ -154,7 +160,12 @@ class TsDemuxer {
   // H.264 NAL unit parsing
   // ---------------------------------------------------------------------------
 
-  static void _parseH264Nalus(Uint8List data, int? pts, DemuxResult result) {
+  static void _parseH264Nalus(
+    Uint8List data,
+    int? pts,
+    int? dts,
+    DemuxResult result,
+  ) {
     final nalus = _findNalUnits(data);
     bool isKeyframe = false;
     final frameData = <Uint8List>[];
@@ -181,7 +192,12 @@ class TsDemuxer {
       // Convert to length-prefixed format (4-byte length prefix per NALU)
       final lengthPrefixed = _toLengthPrefixed(frameData);
       result.videoFrames.add(
-        EsFrame(data: lengthPrefixed, pts: pts, isKeyframe: isKeyframe),
+        EsFrame(
+          data: lengthPrefixed,
+          pts: pts,
+          dts: dts,
+          isKeyframe: isKeyframe,
+        ),
       );
     }
   }
@@ -259,7 +275,12 @@ class TsDemuxer {
   // AAC ADTS parsing
   // ---------------------------------------------------------------------------
 
-  static void _parseAacFrames(Uint8List data, int? pts, DemuxResult result) {
+  static void _parseAacFrames(
+    Uint8List data,
+    int? pts,
+    int? dts,
+    DemuxResult result,
+  ) {
     int offset = 0;
     bool first = true;
 
@@ -303,7 +324,12 @@ class TsDemuxer {
       );
 
       result.audioFrames.add(
-        EsFrame(data: rawFrame, pts: first ? pts : null, isKeyframe: false),
+        EsFrame(
+          data: rawFrame,
+          pts: first ? pts : null,
+          dts: first ? dts : null,
+          isKeyframe: false,
+        ),
       );
 
       first = false;
@@ -351,13 +377,24 @@ class EsFrame {
   /// Presentation timestamp in 90kHz clock ticks, if available.
   final int? pts;
 
+  /// Decoding timestamp in 90kHz clock ticks, if available.
+  final int? dts;
+
   /// Whether this is a keyframe (IDR for H.264).
   final bool isKeyframe;
 
-  const EsFrame({required this.data, this.pts, required this.isKeyframe});
+  const EsFrame({
+    required this.data,
+    this.pts,
+    this.dts,
+    required this.isKeyframe,
+  });
 
   /// PTS converted to milliseconds.
   int? get ptsMs => pts != null ? (pts! ~/ 90) : null;
+
+  /// DTS converted to milliseconds.
+  int? get dtsMs => dts != null ? (dts! ~/ 90) : null;
 }
 
 /// AAC audio configuration from ADTS header.

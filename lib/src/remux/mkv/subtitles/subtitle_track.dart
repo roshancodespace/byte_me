@@ -15,8 +15,16 @@ class SubtitleTrack {
   /// Optional human-readable title.
   final String? title;
 
-  const SubtitleTrack({this.file, this.url, this.language, this.title})
-    : assert(file != null || url != null, 'Must provide either file or url');
+  /// Optional headers (e.g., Referer) required to download the subtitle URL.
+  final Map<String, String>? headers;
+
+  const SubtitleTrack({
+    this.file,
+    this.url,
+    this.language,
+    this.title,
+    this.headers,
+  }) : assert(file != null || url != null, 'Must provide either file or url');
 }
 
 /// A parsed subtitle frame.
@@ -45,15 +53,51 @@ class SrtParser {
       text = await track.file!.readAsString();
     } else if (track.url != null) {
       final request = await HttpClient().getUrl(Uri.parse(track.url!));
+      if (track.headers != null) {
+        track.headers!.forEach((key, value) {
+          request.headers.add(key, value);
+        });
+      }
       final response = await request.close();
-      if (response.statusCode != 200) return [];
+      if (response.statusCode != 200) {
+        print(
+          'Failed to download subtitle from \${track.url}: HTTP \${response.statusCode}',
+        );
+        return [];
+      }
       text = await response.transform(utf8.decoder).join();
+
+      // If it's an HLS playlist, fetch and concatenate all segments
+      if (text.trim().startsWith('#EXTM3U')) {
+        final lines = text.split(RegExp(r'\n'));
+        final buffer = StringBuffer();
+        for (final line in lines) {
+          final l = line.trim();
+          if (l.isNotEmpty && !l.startsWith('#')) {
+            // It's a URL
+            final segUri = Uri.parse(track.url!).resolve(l);
+            final segReq = await HttpClient().getUrl(segUri);
+            if (track.headers != null) {
+              track.headers!.forEach((key, value) {
+                segReq.headers.add(key, value);
+              });
+            }
+            final segRes = await segReq.close();
+            if (segRes.statusCode == 200) {
+              buffer.write(await segRes.transform(utf8.decoder).join());
+              buffer.write('\n\n');
+            }
+          }
+        }
+        text = buffer.toString();
+      }
     } else {
       return [];
     }
+
     final frames = <SubtitleFrame>[];
 
-    // SRT blocks are separated by blank lines.
+    // SRT/VTT blocks are separated by blank lines.
     // Handles \r\n and \n
     final blocks = text.trim().split(RegExp(r'\n\s*\n'));
 
@@ -63,20 +107,28 @@ class SrtParser {
           .map((l) => l.trim())
           .where((l) => l.isNotEmpty)
           .toList();
-      if (lines.length < 3) continue;
+      if (lines.length < 2) continue;
 
-      // Line 0: sequence number (ignore)
-      // Line 1: 00:00:20,000 --> 00:00:24,400
-      final timeStr = lines[1];
-      final timeParts = timeStr.split('-->');
+      int timeLineIndex = -1;
+      for (int i = 0; i < lines.length; i++) {
+        if (lines[i].contains('-->')) {
+          timeLineIndex = i;
+          break;
+        }
+      }
+
+      if (timeLineIndex == -1) continue;
+
+      final timeParts = lines[timeLineIndex].split('-->');
       if (timeParts.length != 2) continue;
 
       final startMs = _parseTimecode(timeParts[0].trim());
       final endMs = _parseTimecode(timeParts[1].trim());
       if (startMs == null || endMs == null || endMs < startMs) continue;
 
-      // Lines 2+: The text
-      final textLines = lines.sublist(2).join('\n');
+      // Lines after timeLine: The text
+      if (timeLineIndex + 1 >= lines.length) continue;
+      final textLines = lines.sublist(timeLineIndex + 1).join('\n');
 
       frames.add(
         SubtitleFrame(
@@ -91,13 +143,13 @@ class SrtParser {
   }
 
   static int? _parseTimecode(String timeStr) {
-    // Format: HH:MM:SS,MMM or HH:MM:SS.MMM
+    // Format: HH:MM:SS,MMM or HH:MM:SS.MMM or MM:SS.MMM
     final match = RegExp(
-      r'^(\d{2,}):(\d{2}):(\d{2})[,.](\d{3})$',
+      r'^(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})$',
     ).firstMatch(timeStr);
     if (match == null) return null;
 
-    final hours = int.parse(match.group(1)!);
+    final hours = match.group(1) != null ? int.parse(match.group(1)!) : 0;
     final minutes = int.parse(match.group(2)!);
     final seconds = int.parse(match.group(3)!);
     final millis = int.parse(match.group(4)!);
