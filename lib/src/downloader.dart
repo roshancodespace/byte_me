@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 
@@ -189,7 +190,7 @@ class ByteMe {
     _pendingJobs[task.id] = job;
     _queue.removeWhere((j) => j.task.id == task.id);
     _queue.add(job);
-    _processQueue();
+    scheduleMicrotask(_processQueue);
   }
 
   void _processQueue() {
