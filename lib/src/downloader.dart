@@ -11,27 +11,6 @@ import 'remux/remuxer.dart';
 ///
 /// Supports HTTP file downloads and HLS streaming with concurrent segments,
 /// AES decryption, and pluggable remuxing.
-///
-/// ```dart
-/// final downloader = ByteMe(maxConcurrentDownloads: 3);
-///
-/// final task = downloader.download(
-///   id: 'my-file',
-///   url: Uri.parse('https://example.com/file.mp4'),
-///   savePath: '/path/to/file.mp4',
-/// );
-///
-/// task.progressStream.listen((p) => print(p.formattedPercent));
-/// task.statusStream.listen((s) => print(s));
-///
-/// // Control
-/// task.pause();
-/// task.resume();
-/// task.cancel();
-///
-/// // Cleanup
-/// downloader.dispose();
-/// ```
 class ByteMe {
   /// Maximum number of top-level downloads running simultaneously.
   final int maxConcurrentDownloads;
@@ -42,6 +21,8 @@ class ByteMe {
 
   final Map<String, DownloadTask> _tasks = {};
   final Queue<_PendingJob> _queue = Queue();
+  final Map<String, _PendingJob> _registeredJobs = {};
+  final Map<String, _PendingJob> _pendingJobs = {};
   int _activeCount = 0;
   bool _disposed = false;
 
@@ -70,7 +51,15 @@ class ByteMe {
   }) {
     _assertNotDisposed();
 
-    final task = DownloadTask(id: id);
+    final existing = _tasks[id];
+    if (existing != null) {
+      if (existing.status == DownloadStatus.downloading ||
+          existing.status == DownloadStatus.queued) {
+        return existing;
+      }
+    }
+
+    final task = existing ?? DownloadTask(id: id);
     _tasks[id] = task;
 
     _enqueue(task, () async {
@@ -90,11 +79,6 @@ class ByteMe {
   ///
   /// Parses the playlist, downloads segments concurrently, decrypts if needed,
   /// and remuxes into a single output file.
-  ///
-  /// The [remuxer] controls the output format:
-  /// - `null` or [ConcatRemuxer] — concatenated MPEG-TS (default)
-  /// - [MkvRemuxer] — Matroska container
-  /// - Custom [Remuxer] — your own processing (e.g. FFmpeg)
   DownloadTask downloadHls({
     required String id,
     required Uri url,
@@ -107,7 +91,15 @@ class ByteMe {
   }) {
     _assertNotDisposed();
 
-    final task = DownloadTask(id: id);
+    final existing = _tasks[id];
+    if (existing != null) {
+      if (existing.status == DownloadStatus.downloading ||
+          existing.status == DownloadStatus.queued) {
+        return existing;
+      }
+    }
+
+    final task = existing ?? DownloadTask(id: id);
     _tasks[id] = task;
 
     _enqueue(task, () async {
@@ -139,17 +131,23 @@ class ByteMe {
     }
   }
 
-  /// Resumes a paused download by [id].
+  /// Resumes a paused or failed download by [id].
   void resume(String id) {
     final task = _tasks[id];
-    if (task == null || task.status != DownloadStatus.paused) return;
+    if (task == null ||
+        (task.status != DownloadStatus.paused &&
+            task.status != DownloadStatus.failed)) {
+      return;
+    }
     task.resume();
 
     // Re-queue for execution
-    final pending = _pendingJobs[id];
-    if (pending != null) {
+    final registered = _registeredJobs[id];
+    if (registered != null) {
       task.updateStatus(DownloadStatus.queued);
-      _queue.add(pending);
+      if (!_queue.contains(registered)) {
+        _queue.add(registered);
+      }
       _processQueue();
     }
   }
@@ -160,6 +158,8 @@ class ByteMe {
     if (task == null) return;
 
     _queue.removeWhere((j) => j.task.id == id);
+    _registeredJobs.remove(id);
+    _pendingJobs.remove(id);
     task.cancel();
   }
 
@@ -175,6 +175,7 @@ class ByteMe {
     }
     _tasks.clear();
     _queue.clear();
+    _registeredJobs.clear();
     _pendingJobs.clear();
   }
 
@@ -182,11 +183,11 @@ class ByteMe {
   // Internal queue management
   // ---------------------------------------------------------------------------
 
-  final Map<String, _PendingJob> _pendingJobs = {};
-
   void _enqueue(DownloadTask task, Future<void> Function() executor) {
     final job = _PendingJob(task, executor);
+    _registeredJobs[task.id] = job;
     _pendingJobs[task.id] = job;
+    _queue.removeWhere((j) => j.task.id == task.id);
     _queue.add(job);
     _processQueue();
   }
@@ -205,6 +206,10 @@ class ByteMe {
     } finally {
       _activeCount--;
       _pendingJobs.remove(job.task.id);
+      if (job.task.status == DownloadStatus.completed ||
+          job.task.status == DownloadStatus.cancelled) {
+        _registeredJobs.remove(job.task.id);
+      }
       _processQueue();
     }
   }

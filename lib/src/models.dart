@@ -107,3 +107,14 @@ class RetryConfig {
     return Duration(milliseconds: (exponential * jitter).toInt());
   }
 }
+
+/// Thrown when a remote server signals rate limiting (HTTP 429 or 503).
+class RateLimitException implements Exception {
+  final int statusCode;
+  final Duration? retryAfter;
+  const RateLimitException(this.statusCode, [this.retryAfter]);
+
+  @override
+  String toString() =>
+      'RateLimitException: HTTP $statusCode${retryAfter != null ? ' (Retry-After: ${retryAfter!.inSeconds}s)' : ''}';
+}

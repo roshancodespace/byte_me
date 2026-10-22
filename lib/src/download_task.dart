@@ -14,6 +14,7 @@ class DownloadTask {
 
   DownloadStatus _status = DownloadStatus.queued;
   DownloadProgress _progress = DownloadProgress.zero;
+  String? _error;
 
   final _statusCtrl = StreamController<DownloadStatus>.broadcast();
   final _progressCtrl = StreamController<DownloadProgress>.broadcast();
@@ -32,6 +33,9 @@ class DownloadTask {
 
   /// Current progress snapshot.
   DownloadProgress get progress => _progress;
+
+  /// Last error message if status is failed.
+  String? get error => _error;
 
   /// Stream of status changes.
   Stream<DownloadStatus> get statusStream => _statusCtrl.stream;
@@ -55,7 +59,9 @@ class DownloadTask {
 
   /// Resumes a paused download. No-op if not paused.
   void resume() {
-    if (_status != DownloadStatus.paused) return;
+    if (_status != DownloadStatus.paused && _status != DownloadStatus.failed) {
+      return;
+    }
     updateStatus(DownloadStatus.queued);
     _onResume?.call();
   }
@@ -75,9 +81,14 @@ class DownloadTask {
   // ---------------------------------------------------------------------------
 
   /// Updates the status and notifies listeners.
-  void updateStatus(DownloadStatus s) {
-    if (_status == s) return;
+  void updateStatus(DownloadStatus s, [String? error]) {
+    if (_status == s && _error == error) return;
     _status = s;
+    if (s == DownloadStatus.downloading || s == DownloadStatus.queued) {
+      _error = null;
+    } else if (error != null) {
+      _error = error;
+    }
     if (!_statusCtrl.isClosed) _statusCtrl.add(s);
   }
 

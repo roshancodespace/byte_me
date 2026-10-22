@@ -33,7 +33,6 @@ class M3u8Parser {
     HttpClient client,
   ) async {
     final content = await _fetchText(url, headers, client);
-    if (content == null) throw Exception('Failed to load m3u8: $url');
     return parseContent(content, Uri.parse(url), headers, client);
   }
 
@@ -95,9 +94,6 @@ class M3u8Parser {
               headers,
               client,
             );
-            if (key == null) {
-              throw Exception('Failed to fetch decryption key');
-            }
           }
           iv = ivHex != null ? _hexToBytes(ivHex) : null;
         }
@@ -136,20 +132,21 @@ class M3u8Parser {
   // HTTP helpers (simple, with basic retry)
   // ---------------------------------------------------------------------------
 
-  static Future<String?> _fetchText(
+  static Future<String> _fetchText(
     String url,
     Map<String, String> headers,
     HttpClient client,
   ) async {
     final bytes = await _fetchBytes(url, headers, client);
-    return bytes != null ? utf8.decode(bytes) : null;
+    return utf8.decode(bytes);
   }
 
-  static Future<Uint8List?> _fetchBytes(
+  static Future<Uint8List> _fetchBytes(
     String url,
     Map<String, String> headers,
     HttpClient client,
   ) async {
+    dynamic lastError;
     for (int i = 0; i < 3; i++) {
       try {
         final request = await client.getUrl(Uri.parse(url));
@@ -170,11 +167,33 @@ class M3u8Parser {
           return result;
         }
         await response.drain<void>();
-      } catch (_) {
+        if (response.statusCode == 429) {
+          lastError = const HttpException(
+            'HTTP 429: Too Many Requests (Server Rate Limited)',
+          );
+          if (i < 2) await Future.delayed(Duration(seconds: 2 * (i + 1)));
+          continue;
+        } else if (response.statusCode == 403) {
+          throw const HttpException(
+            'HTTP 403: Forbidden (Stream URL expired or blocked)',
+          );
+        } else if (response.statusCode == 404) {
+          throw const HttpException('HTTP 404: Playlist not found');
+        } else {
+          lastError = HttpException(
+            'HTTP ${response.statusCode}: ${response.reasonPhrase}',
+          );
+        }
+      } catch (e) {
+        lastError = e;
+        if (e is HttpException &&
+            (e.message.contains('403') || e.message.contains('404'))) {
+          rethrow;
+        }
         if (i < 2) await Future.delayed(const Duration(seconds: 1));
       }
     }
-    return null;
+    throw lastError ?? Exception('Failed to fetch data from $url');
   }
 
   // ---------------------------------------------------------------------------

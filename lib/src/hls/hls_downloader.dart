@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math';
 
 import 'package:path/path.dart' as p;
 
@@ -34,9 +35,10 @@ class HlsDownloader {
 
     task.updateStatus(DownloadStatus.downloading);
 
-    // Temp directory for segments
+    // Deterministic temp directory based on task ID so downloaded segments survive pauses and failures
+    final safeTaskId = task.id.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
     final tempDir = Directory(
-      '${p.dirname(savePath)}/.byte_me_hls_${task.id}_${DateTime.now().millisecondsSinceEpoch}',
+      p.join(p.dirname(savePath), '.byte_me_hls_$safeTaskId'),
     );
     await tempDir.create(recursive: true);
 
@@ -118,31 +120,76 @@ class HlsDownloader {
 
           final (index, segment) = segmentIterator.current;
           final segFile = File(p.join(tempDir.path, 'seg_$index.ts'));
+          final partFile = File(p.join(tempDir.path, 'seg_$index.ts.part'));
 
-          // Download segment with retries
+          // Check if segment is already completely downloaded
+          if (segFile.existsSync()) {
+            final len = segFile.lengthSync();
+            if (len > 0) {
+              segmentFiles[index] = segFile;
+              completedCount++;
+              completedBytes += len;
+              totalBytesReceived += len;
+              emitProgress();
+              continue;
+            } else {
+              try {
+                segFile.deleteSync();
+              } catch (_) {}
+            }
+          }
+
+          // Clean up any stale partial segment from a prior failed attempt
+          if (partFile.existsSync()) {
+            try {
+              partFile.deleteSync();
+            } catch (_) {}
+          }
+
+          // Download segment with retries and adaptive backoff
           bool success = false;
+          String? lastErrorMessage;
+
           for (int attempt = 0; attempt <= retry.maxRetries; attempt++) {
             if (cancelled) return;
             try {
-              await _downloadSegment(segment.url, segFile, effectiveHeaders, (
+              await _downloadSegment(segment.url, partFile, effectiveHeaders, (
                 bytes,
               ) {
                 totalBytesReceived += bytes;
                 emitProgress();
               });
+
+              if (partFile.existsSync()) {
+                await partFile.rename(segFile.path);
+              }
               success = true;
               break;
             } catch (e) {
               if (cancelled) return;
+              lastErrorMessage = _friendlyErrorMessage(e);
+
               if (attempt < retry.maxRetries) {
-                await Future.delayed(retry.delayFor(attempt + 1));
+                if (e is RateLimitException) {
+                  // Server rate limited: use server Retry-After or exponential backoff with jitter
+                  final delay =
+                      e.retryAfter ??
+                      Duration(
+                        milliseconds:
+                            2500 * (attempt + 1) + Random().nextInt(1500),
+                      );
+                  await Future.delayed(delay);
+                } else {
+                  await Future.delayed(retry.delayFor(attempt + 1));
+                }
               }
             }
           }
 
           if (!success) {
             throw Exception(
-              'Segment $index failed after ${retry.maxRetries} retries',
+              lastErrorMessage ??
+                  'Segment $index failed after ${retry.maxRetries} retries',
             );
           }
 
@@ -222,14 +269,19 @@ class HlsDownloader {
       // Normal cancellation flow — status already set
     } catch (e) {
       if (!cancelled) {
-        task.updateStatus(DownloadStatus.failed);
+        final errorMsg = _friendlyErrorMessage(e);
+        task.updateStatus(DownloadStatus.failed, errorMsg);
       }
     } finally {
-      // Clean up temp directory
-      if (tempDir.existsSync()) {
-        try {
-          await tempDir.delete(recursive: true);
-        } catch (_) {}
+      // Clean up temp directory ONLY if completed or cancelled permanently.
+      // Keep downloaded segments if paused or failed so downloads resume without re-downloading!
+      if (task.status == DownloadStatus.completed ||
+          task.status == DownloadStatus.cancelled) {
+        if (tempDir.existsSync()) {
+          try {
+            await tempDir.delete(recursive: true);
+          } catch (_) {}
+        }
       }
     }
   }
@@ -245,9 +297,24 @@ class HlsDownloader {
     headers.forEach((k, v) => request.headers.set(k, v));
     final response = await request.close();
 
-    if (response.statusCode != 200) {
+    if (response.statusCode == 429 || response.statusCode == 503) {
+      final retryAfterHeader = response.headers.value('retry-after');
+      Duration? retryAfter;
+      if (retryAfterHeader != null) {
+        final parsed = int.tryParse(retryAfterHeader);
+        if (parsed != null && parsed > 0 && parsed <= 60) {
+          retryAfter = Duration(seconds: parsed);
+        }
+      }
       await response.drain<void>();
-      throw Exception('Segment download failed: HTTP ${response.statusCode}');
+      throw RateLimitException(response.statusCode, retryAfter);
+    }
+
+    if (response.statusCode != 200 && response.statusCode != 206) {
+      await response.drain<void>();
+      throw HttpException(
+        'HTTP ${response.statusCode}: ${response.reasonPhrase}',
+      );
     }
 
     final sink = destination.openWrite();
@@ -260,6 +327,44 @@ class HlsDownloader {
     } finally {
       await sink.close();
     }
+  }
+
+  static String _friendlyErrorMessage(Object error) {
+    if (error is RateLimitException) {
+      return 'Rate limited by server (HTTP ${error.statusCode}). The video host throttled concurrent segment requests.';
+    }
+    final str = error.toString();
+    if (str.contains('429')) {
+      return 'Rate limited by server (HTTP 429). The video host throttled concurrent requests.';
+    }
+    if (str.contains('403')) {
+      return 'Access forbidden (HTTP 403). The video stream URL expired or was blocked.';
+    }
+    if (str.contains('404')) {
+      return 'Stream not found (HTTP 404). The video file is missing on the remote host.';
+    }
+    if (str.contains('500') ||
+        str.contains('502') ||
+        str.contains('503') ||
+        str.contains('504')) {
+      return 'Remote server error. The video host is temporarily unavailable.';
+    }
+    if (error is SocketException || str.contains('SocketException')) {
+      return 'Connection error: Unable to reach video host. Check your network.';
+    }
+    if (error is HandshakeException || str.contains('HandshakeException')) {
+      return 'SSL/TLS connection error. Failed to establish secure connection.';
+    }
+    if (error is TimeoutException || str.contains('TimeoutException')) {
+      return 'Connection timed out waiting for server response.';
+    }
+    if (error is FileSystemException || str.contains('FileSystemException')) {
+      return 'Disk error: Check storage space and write permissions.';
+    }
+    return str
+        .replaceAll('Exception: ', '')
+        .replaceAll('StateError: ', '')
+        .replaceAll('HttpException: ', '');
   }
 }
 

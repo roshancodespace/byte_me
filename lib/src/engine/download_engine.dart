@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import '../download_task.dart';
 import '../models.dart';
@@ -26,6 +27,7 @@ class DownloadEngine {
     int attempts = 0;
     final stopwatch = Stopwatch()..start();
     int lastEmitMs = 0;
+    String? lastError;
 
     while (true) {
       if (task.status == DownloadStatus.cancelled) return;
@@ -67,18 +69,36 @@ class DownloadEngine {
           return;
         }
 
+        // Rate limiting (HTTP 429 / 503)
+        if (response.statusCode == 429 || response.statusCode == 503) {
+          final retryAfterHeader = response.headers.value('retry-after');
+          Duration? retryAfter;
+          if (retryAfterHeader != null) {
+            final parsed = int.tryParse(retryAfterHeader);
+            if (parsed != null && parsed > 0 && parsed <= 60) {
+              retryAfter = Duration(seconds: parsed);
+            }
+          }
+          await response.drain<void>();
+          throw RateLimitException(response.statusCode, retryAfter);
+        }
+
         // Permanent errors — never retry
         if (response.statusCode == 404 ||
             response.statusCode == 401 ||
             response.statusCode == 403) {
           await response.drain<void>();
-          throw _PermanentError('HTTP ${response.statusCode}');
+          throw _PermanentError(
+            'HTTP ${response.statusCode}: ${response.reasonPhrase}',
+          );
         }
 
         // Other client/server errors — may retry
         if (response.statusCode >= 400) {
           await response.drain<void>();
-          throw Exception('HTTP ${response.statusCode}');
+          throw HttpException(
+            'HTTP ${response.statusCode}: ${response.reasonPhrase}',
+          );
         }
 
         final isResuming = response.statusCode == 206;
@@ -156,17 +176,60 @@ class DownloadEngine {
         }
       } catch (e) {
         if (task.status == DownloadStatus.cancelled) return;
+        lastError = _friendlyErrorMessage(e);
 
         // Permanent errors and retry exhaustion → fail
         if (e is _PermanentError || attempts > retry.maxRetries) {
-          task.updateStatus(DownloadStatus.failed);
+          task.updateStatus(DownloadStatus.failed, lastError);
           return;
         }
 
-        // Exponential backoff before next attempt
-        await Future.delayed(retry.delayFor(attempts));
+        // Adaptive backoff before next attempt
+        if (e is RateLimitException) {
+          final delay =
+              e.retryAfter ??
+              Duration(milliseconds: 2500 * attempts + Random().nextInt(1500));
+          await Future.delayed(delay);
+        } else {
+          await Future.delayed(retry.delayFor(attempts));
+        }
       }
     }
+  }
+
+  static String _friendlyErrorMessage(Object error) {
+    if (error is RateLimitException) {
+      return 'Rate limited by server (HTTP ${error.statusCode}). Server is blocking excessive requests.';
+    }
+    final str = error.toString();
+    if (str.contains('429')) {
+      return 'Rate limited by server (HTTP 429). Server is blocking excessive requests.';
+    }
+    if (str.contains('403')) {
+      return 'Access forbidden (HTTP 403). Download link or token expired.';
+    }
+    if (str.contains('404')) {
+      return 'File not found (HTTP 404). File is missing on server.';
+    }
+    if (str.contains('500') ||
+        str.contains('502') ||
+        str.contains('503') ||
+        str.contains('504')) {
+      return 'Remote server error. Server is temporarily unavailable.';
+    }
+    if (error is SocketException || str.contains('SocketException')) {
+      return 'Network connection error. Check your connection.';
+    }
+    if (error is TimeoutException || str.contains('TimeoutException')) {
+      return 'Connection timed out waiting for server.';
+    }
+    if (error is FileSystemException || str.contains('FileSystemException')) {
+      return 'Disk error: Check storage space and write permissions.';
+    }
+    return str
+        .replaceAll('Exception: ', '')
+        .replaceAll('_PermanentError: ', '')
+        .replaceAll('HttpException: ', '');
   }
 }
 
@@ -175,5 +238,5 @@ class _PermanentError implements Exception {
   final String message;
   _PermanentError(this.message);
   @override
-  String toString() => '_PermanentError: $message';
+  String toString() => message;
 }
